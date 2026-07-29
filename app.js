@@ -43,7 +43,8 @@ let state = {
   settings: { useSoon: 6, old: 12, sync: null },   // sync: {config:{...}, code:'ABC123'}
   bins: [],      // {id,name,desc,createdAt,updatedAt,deleted}
   items: [],     // {id,binId,name,qty,unit,category,dateFrozen,bestBefore,status,notes,createdAt,updatedAt,deleted}
-  grocery: []    // {id,itemId,name,qtyNeeded,unit,category,fromBinId,notes,done,updatedAt,deleted}
+  grocery: [],   // {id,itemId,name,qtyNeeded,unit,category,fromBinId,notes,done,updatedAt,deleted}
+  products: []   // catalog: {id,name,unit,category,updatedAt,deleted}
 };
 
 function loadState(){
@@ -51,6 +52,11 @@ function loadState(){
     const raw = localStorage.getItem(LS_KEY);
     if(raw){ const s = JSON.parse(raw); if(s && s.bins) state = Object.assign(state, s); }
   } catch(e){ console.warn('loadState', e); }
+  if(!Array.isArray(state.products)) state.products = [];
+  // migration: build the product catalog from anything already entered
+  state.items.filter(i => !i.deleted).forEach(i => upsertProduct(i, { quiet: true }));
+  // migration: items already sitting at qty 0 now disappear from bins
+  state.items.filter(i => !i.deleted && (+i.qty || 0) <= 0).forEach(i => { i.deleted = true; i.updatedAt = Date.now(); });
 }
 function saveLocal(){
   try { localStorage.setItem(LS_KEY, JSON.stringify(state)); } catch(e){ console.warn('saveLocal', e); }
@@ -59,6 +65,7 @@ function saveLocal(){
 const liveBins   = () => state.bins.filter(b => !b.deleted);
 const liveItems  = () => state.items.filter(i => !i.deleted);
 const liveGroc   = () => state.grocery.filter(g => !g.deleted);
+const liveProds  = () => state.products.filter(p => !p.deleted).sort((a,b)=>a.name.localeCompare(b.name));
 const bin        = (id) => state.bins.find(b => b.id === id && !b.deleted);
 const binItems   = (id) => liveItems().filter(i => i.binId === id).sort((a,b)=>a.name.localeCompare(b.name));
 
@@ -115,7 +122,7 @@ const sync = {
   },
 
   applyRemote(id, d){
-    const listName = { bin:'bins', item:'items', grocery:'grocery' }[d.kind];
+    const listName = { bin:'bins', item:'items', grocery:'grocery', product:'products' }[d.kind];
     if(d.kind === 'meta'){
       const local = state.settings;
       if((d.updatedAt || 0) > (local.metaUpdatedAt || 0)){
@@ -157,6 +164,7 @@ const sync = {
     state.bins.forEach(b => this.push('bin', b));
     state.items.forEach(i => this.push('item', i));
     state.grocery.forEach(g => this.push('grocery', g));
+    state.products.forEach(p => this.push('product', p));
     this.pushMeta();
   },
 
@@ -171,6 +179,24 @@ function touch(kind, entity){
   entity.updatedAt = Date.now();
   saveLocal();
   if(sync.enabled && !sync.applying) sync.push(kind, entity);
+}
+
+/* ---------- product catalog ---------- */
+function upsertProduct(src, opts){
+  const name = (src.name || '').trim();
+  if(!name) return null;
+  const key = name.toLowerCase();
+  let p = state.products.find(x => x.name.trim().toLowerCase() === key && !x.deleted);
+  if(!p){
+    p = { id: uid(), name, unit: src.unit || 'pkg', category: src.category || 'Other', deleted: false, updatedAt: Date.now() };
+    state.products.push(p);
+    if(!(opts && opts.quiet)) touch('product', p);
+  } else if(p.unit !== src.unit || p.category !== src.category){
+    p.unit = src.unit || p.unit;
+    p.category = src.category || p.category;
+    if(!(opts && opts.quiet)) touch('product', p);
+  }
+  return p;
 }
 
 /* ---------- grocery automation ---------- */
@@ -193,22 +219,25 @@ function removeFromGroceryByItem(itemId){
 
 function setItemQty(item, qty){
   qty = Math.max(0, qty);
-  item.qty = qty;
-  if(qty === 0 && item.status !== 'Used Up' && item.status !== 'Buy'){
-    item.status = 'Used Up';
+  if(qty === 0){
+    // used up: leaves the bin entirely, lands on the grocery list
     addToGrocery(item);
-    toast(`"${item.name}" used up — added to grocery list 🛒`);
-  } else if(qty > 0 && item.status === 'Used Up'){
-    item.status = 'Available';
+    item.qty = 0;
+    item.deleted = true;
+    touch('item', item);
+    toast(`"${item.name}" used up — moved to the grocery list 🛒`);
+    render();
+    return;
   }
+  item.qty = qty;
   touch('item', item);
   render();
 }
 
 function toggleBuy(item){
   if(item.status === 'Buy'){
-    item.status = item.qty > 0 ? 'Available' : 'Used Up';
-    if(item.qty > 0) removeFromGroceryByItem(item.id);
+    item.status = 'Available';
+    removeFromGroceryByItem(item.id);
   } else {
     item.status = 'Buy';
     addToGrocery(item);
@@ -369,19 +398,17 @@ function renderBin(v, back, top, title){
   top.style.display = 'flex';
   top.onclick = () => openBinMenu(b);
 
-  const items = binItems(b.id);
-  const inStock = items.filter(i => i.qty > 0);
-  const outStock = items.filter(i => i.qty <= 0);
+  const inStock = binItems(b.id).filter(i => i.qty > 0);
 
   let html = '';
   if(b.desc) html += `<div style="margin:-4px 2px 12px;color:var(--ink-soft);font-size:13.5px">${esc(b.desc)}</div>`;
   html += `<button class="btn block" id="additem">＋ Add item to ${esc(b.name)}</button><div style="height:13px"></div>`;
 
-  if(!items.length){
+  if(!inStock.length){
     html += `<div class="card empty"><span class="big">📦</span>Nothing in this bin yet.</div>`;
   }
   const row = (i) => `
-    <div class="item-row ${i.qty <= 0 ? 'dim' : ''}" id="ir-${i.id}">
+    <div class="item-row" id="ir-${i.id}">
       <div class="item-main" data-edit="${i.id}">
         <div class="iname">${esc(i.name)} ${statusPill(i)}</div>
         <div class="imeta"><span class="pill blue">${esc(i.category || 'Other')}</span>${agePills(i)}
@@ -395,10 +422,6 @@ function renderBin(v, back, top, title){
       </div>
     </div>`;
   inStock.forEach(i => html += row(i));
-  if(outStock.length){
-    html += `<div class="section-h"><h2>Used up</h2></div>`;
-    outStock.forEach(i => html += row(i));
-  }
   v.innerHTML = html;
 
   $('#additem', v).onclick = () => openItemSheet(null, b.id);
@@ -574,6 +597,8 @@ function renderSettings(v, title){
     </div>
     <input type="file" id="importfile" accept=".json,application/json" style="display:none">
     <div style="height:10px"></div>
+    <button class="btn ghost block" id="prodbtn">🏷 Saved products (${liveProds().length})</button>
+    <div style="height:10px"></div>
     <button class="btn danger block" id="wipebtn">Erase everything on this phone</button>
   </div>
   <div style="text-align:center;color:var(--ink-soft);font-size:12px;padding:6px">FroShizzle v1.0 · made for Rockstar's deep freezer ❄</div>`;
@@ -618,17 +643,20 @@ function renderSettings(v, title){
         const s2 = JSON.parse(r.result);
         if(!s2.bins || !s2.items) throw new Error('not a FroShizzle backup');
         state = Object.assign(state, s2);
+        if(!Array.isArray(state.products)) state.products = [];
         state.bins.forEach(b => touch('bin', b));
         state.items.forEach(i => touch('item', i));
         state.grocery.forEach(g => touch('grocery', g));
+        state.products.forEach(p => touch('product', p));
         saveLocal(); toast('Backup imported ✓'); render();
       } catch(err){ toast('Import failed: ' + err.message); }
     };
     r.readAsText(f);
   };
+  $('#prodbtn', v).onclick = () => openProductsSheet();
   $('#wipebtn', v).onclick = () => confirmSheet('Erase everything?', 'This deletes all bins, items and the grocery list on this phone. If sync is on, other phones are not wiped.', () => {
     localStorage.removeItem(LS_KEY);
-    state = { settings: { useSoon: 6, old: 12, sync: null }, bins: [], items: [], grocery: [] };
+    state = { settings: { useSoon: 6, old: 12, sync: null }, bins: [], items: [], grocery: [], products: [] };
     sync.stop(); toast('All data erased'); nav('home');
   });
 }
@@ -679,11 +707,24 @@ function bindChips(id, onSel){
 }
 function chipVal(id){ const c = $('#' + id + ' .chip.sel'); return c ? c.dataset.val : null; }
 
+function selectChip(id, val){
+  $$('#' + id + ' .chip').forEach(x => x.classList.toggle('sel', x.dataset.val === val));
+}
+
 function openItemSheet(item, binId){
   const isNew = !item;
   const it = item || { name: '', qty: 1, unit: 'pkg', category: 'Other', dateFrozen: todayStr(), bestBefore: '', status: 'Available', notes: '' };
+  const prods = liveProds();
+  const prevPicker = (isNew && prods.length) ? `
+    <div class="frow"><label>Add a product you've entered before</label>
+      <select id="f-prev">
+        <option value="">— pick from your saved products —</option>
+        ${prods.map(p => `<option value="${esc(p.id)}">${esc(p.name)} (${esc(p.category)})</option>`).join('')}
+      </select></div>
+    <div style="text-align:center;color:var(--ink-soft);font-size:12px;margin:-4px 0 10px">— or type a new one —</div>` : '';
   openSheet(`
     <h2>${isNew ? '＋ Add item' : '✏️ Edit item'}</h2>
+    ${prevPicker}
     <div class="frow"><label>Item name</label><input id="f-name" value="${esc(it.name)}" placeholder="e.g. Ground beef 1lb" autocomplete="off"></div>
     <div class="frow2">
       <div class="frow"><label>Quantity</label><input id="f-qty" type="number" min="0" step="1" value="${it.qty}"></div>
@@ -694,7 +735,7 @@ function openItemSheet(item, binId){
       <div class="frow"><label>Date frozen</label><input id="f-frozen" type="date" value="${esc(it.dateFrozen || '')}"></div>
       <div class="frow"><label>Best before (optional)</label><input id="f-bb" type="date" value="${esc(it.bestBefore || '')}"></div>
     </div>
-    <div class="frow"><label>Status</label>${chipRow('f-status', STATUSES, it.status)}</div>
+    <div class="frow"><label>Status</label>${chipRow('f-status', ['Available','Low','Buy'], it.status === 'Used Up' ? 'Available' : it.status)}</div>
     <div class="frow"><label>Notes (optional)</label><input id="f-notes" value="${esc(it.notes || '')}" placeholder="e.g. from Costco, use for stew"></div>
     <div class="sheet-actions">
       ${isNew ? '' : '<button class="btn danger" id="f-del">Delete</button>'}
@@ -702,6 +743,14 @@ function openItemSheet(item, binId){
       <button class="btn" id="f-save">${isNew ? 'Add to bin' : 'Save'}</button>
     </div>`);
   bindChips('f-cat'); bindChips('f-status');
+  const prev = $('#f-prev');
+  if(prev) prev.onchange = () => {
+    const p = state.products.find(x => x.id === prev.value);
+    if(!p) return;
+    $('#f-name').value = p.name;
+    $('#f-unit').value = UNITS.includes(p.unit) ? p.unit : 'other';
+    selectChip('f-cat', CATEGORIES.includes(p.category) ? p.category : 'Other');
+  };
   $('#f-cancel').onclick = closeSheet;
   if(!isNew) $('#f-del').onclick = () => confirmSheet('Delete "' + it.name + '"?', 'Removes it from the bin (does not add it to the grocery list).', () => {
     it.deleted = true; touch('item', it); removeFromGroceryByItem(it.id); render();
@@ -722,13 +771,17 @@ function openItemSheet(item, binId){
       it.id = uid(); it.binId = binId; it.deleted = false;
       state.items.push(it);
     }
+    upsertProduct(it);   // remember this product for the dropdown
     // grocery side-effects
     if(it.status === 'Buy' && wasStatus !== 'Buy') addToGrocery(it);
-    if(it.qty === 0 && it.status === 'Available') it.status = 'Used Up';
-    if(it.qty === 0 && it.status === 'Used Up') addToGrocery(it);
+    if(it.qty === 0){
+      addToGrocery(it);
+      it.deleted = true;   // qty 0 leaves the bin, lives on the grocery list
+    }
     touch('item', it);
     closeSheet(); render();
-    if(isNew) toast('Added "' + it.name + '" ❄');
+    if(it.qty === 0) toast(`"${it.name}" is at 0 — moved to the grocery list 🛒`);
+    else if(isNew) toast('Added "' + it.name + '" ❄');
   };
 }
 
@@ -777,6 +830,27 @@ function openBinMenu(b){
   });
 }
 
+/* ---------- product catalog sheet ---------- */
+function openProductsSheet(){
+  const prods = liveProds();
+  openSheet(`
+    <h2>🏷 Saved products</h2>
+    <p style="color:var(--ink-soft);font-size:13px;margin-top:0">Every product you've ever entered. These fill the "previously entered" dropdown when adding items. Deleting one here doesn't touch the freezer or grocery list.</p>
+    ${prods.length ? prods.map(p => `
+      <div class="g-row">
+        <div class="gmain"><div class="gname">${esc(p.name)}</div>
+        <div class="gmeta">${esc(p.unit)} · ${esc(p.category)}</div></div>
+        <button class="iconbtn" style="background:var(--blue-50);color:var(--ink-soft);width:34px;height:34px" data-delp="${p.id}">✕</button>
+      </div>`).join('') : '<div class="empty">Nothing saved yet — products appear here as you add items.</div>'}
+    <div class="sheet-actions"><button class="btn ghost block" id="p-close">Close</button></div>`);
+  $$('#sheet [data-delp]').forEach(el => el.onclick = () => {
+    const p = state.products.find(x => x.id === el.dataset.delp);
+    p.deleted = true; touch('product', p);
+    openProductsSheet();
+  });
+  $('#p-close').onclick = closeSheet;
+}
+
 /* ---------- grocery sheets ---------- */
 function openGrocerySheet(){
   openSheet(`
@@ -822,8 +896,10 @@ function openRestockSheet(g){
     const qty = Math.max(1, +$('#r-qty').value || 1);
     const binId = $('#r-bin').value;
     if(!binId){ toast('Pick a bin'); return; }
-    // if the original item still exists, revive it; else create new
-    let it = g.itemId ? state.items.find(x => x.id === g.itemId && !x.deleted) : null;
+    // merge into a matching live item in the target bin if there is one; else create new
+    let it = state.items.find(x => !x.deleted && x.binId === binId &&
+      x.name.toLowerCase() === g.name.toLowerCase() && x.unit === $('#r-unit').value) ||
+      (g.itemId ? state.items.find(x => x.id === g.itemId && !x.deleted) : null);
     if(it){
       it.qty = (+it.qty || 0) + qty;
       it.binId = binId; it.status = 'Available'; it.dateFrozen = todayStr();
@@ -833,6 +909,7 @@ function openRestockSheet(g){
         dateFrozen: todayStr(), bestBefore: '', status: 'Available', notes: g.notes || '', deleted: false };
       state.items.push(it); touch('item', it);
     }
+    upsertProduct(it);
     g.deleted = true; touch('grocery', g);
     closeSheet(); render();
     toast(`"${it.name}" back in the freezer ✓`);
