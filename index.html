@@ -1,0 +1,241 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover, user-scalable=no">
+<title>FroShizzle — Freezer Inventory</title>
+<meta name="description" content="Freezer bin inventory with QR codes, search and automatic grocery list.">
+<link rel="manifest" href="manifest.webmanifest">
+<meta name="theme-color" content="#0b3c78">
+<link rel="icon" href="icon-192.png">
+<link rel="apple-touch-icon" href="icon-192.png">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<style>
+:root{
+  --blue-900:#0b3c78; --blue-700:#155e9e; --blue-500:#0ea5e9; --blue-100:#dbeefc; --blue-50:#eff8ff;
+  --ink:#12283d; --ink-soft:#51677d; --line:#d7e4ef; --card:#ffffff; --bg:#eef4fa;
+  --green:#15803d; --green-bg:#dcfce7; --amber:#b45309; --amber-bg:#fef3c7; --red:#b91c1c; --red-bg:#fee2e2;
+  --violet:#6d28d9; --violet-bg:#ede9fe;
+  --radius:14px; --shadow:0 1px 3px rgba(18,40,61,.10),0 4px 14px rgba(18,40,61,.06);
+  --safe-b:env(safe-area-inset-bottom,0px); --safe-t:env(safe-area-inset-top,0px);
+}
+*{box-sizing:border-box;-webkit-tap-highlight-color:transparent}
+html,body{margin:0;padding:0}
+body{font-family:system-ui,-apple-system,'Segoe UI',Roboto,sans-serif;background:var(--bg);color:var(--ink);
+  min-height:100vh;overscroll-behavior-y:contain}
+button{font:inherit;border:none;background:none;cursor:pointer;color:inherit;padding:0}
+input,select,textarea{font:inherit;color:var(--ink)}
+h1,h2,h3{margin:0}
+
+/* ---------- layout ---------- */
+#topbar{position:sticky;top:0;z-index:30;background:linear-gradient(160deg,var(--blue-900),var(--blue-700));
+  color:#fff;padding:calc(10px + var(--safe-t)) 16px 10px;display:flex;align-items:center;gap:10px;min-height:56px;
+  box-shadow:0 2px 10px rgba(11,60,120,.25)}
+#topbar .title{font-size:19px;font-weight:700;flex:1;display:flex;align-items:center;gap:9px;min-width:0}
+#topbar .title span{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+#topbar .title img{width:28px;height:28px;border-radius:7px}
+.iconbtn{width:40px;height:40px;border-radius:12px;display:flex;align-items:center;justify-content:center;
+  font-size:20px;color:#fff;background:rgba(255,255,255,.14)}
+.iconbtn:active{background:rgba(255,255,255,.3)}
+#view{padding:14px 14px 110px;max-width:640px;margin:0 auto}
+@media(min-width:700px){#view{padding-top:20px}}
+
+/* ---------- bottom nav ---------- */
+#nav{position:fixed;bottom:0;left:0;right:0;z-index:30;background:#fff;border-top:1px solid var(--line);
+  display:flex;justify-content:space-around;align-items:flex-end;padding:6px 4px calc(8px + var(--safe-b));
+  box-shadow:0 -2px 12px rgba(18,40,61,.08)}
+#nav button{flex:1;display:flex;flex-direction:column;align-items:center;gap:2px;font-size:11px;
+  color:var(--ink-soft);padding:4px 0;position:relative;max-width:110px}
+#nav button .ni{font-size:22px;line-height:1}
+#nav button.active{color:var(--blue-700);font-weight:700}
+#nav button .badge{position:absolute;top:-2px;right:calc(50% - 24px);background:var(--red);color:#fff;
+  font-size:10px;font-weight:700;border-radius:9px;min-width:17px;height:17px;display:flex;align-items:center;
+  justify-content:center;padding:0 4px}
+#nav .scanwrap{margin-top:-26px}
+#nav .scanbtn{width:58px;height:58px;border-radius:50%;background:linear-gradient(160deg,var(--blue-500),var(--blue-700));
+  color:#fff;font-size:26px;display:flex;align-items:center;justify-content:center;box-shadow:0 4px 14px rgba(14,165,233,.45);
+  border:4px solid #fff}
+#nav .scanbtn:active{transform:scale(.94)}
+
+/* ---------- cards & common ---------- */
+.card{background:var(--card);border-radius:var(--radius);box-shadow:var(--shadow);padding:14px;margin-bottom:12px}
+.stat-row{display:grid;grid-template-columns:repeat(4,1fr);gap:8px;margin-bottom:14px}
+.stat{background:#fff;border-radius:12px;box-shadow:var(--shadow);padding:10px 6px;text-align:center}
+.stat b{display:block;font-size:20px}
+.stat span{font-size:10.5px;color:var(--ink-soft);letter-spacing:.02em}
+.stat.warn b{color:var(--amber)} .stat.old b{color:var(--red)} .stat.buy b{color:var(--violet)}
+.section-h{display:flex;align-items:center;justify-content:space-between;margin:16px 2px 10px}
+.section-h h2{font-size:15px;color:var(--ink-soft);font-weight:700;text-transform:uppercase;letter-spacing:.06em}
+.btn{display:inline-flex;align-items:center;justify-content:center;gap:7px;background:var(--blue-700);color:#fff;
+  font-weight:600;border-radius:12px;padding:11px 16px;font-size:15px}
+.btn:active{opacity:.85}
+.btn.ghost{background:var(--blue-50);color:var(--blue-700);border:1px solid var(--blue-100)}
+.btn.danger{background:var(--red-bg);color:var(--red)}
+.btn.small{padding:7px 12px;font-size:13px;border-radius:10px}
+.btn.block{width:100%}
+.btn:disabled{opacity:.5}
+.empty{color:var(--ink-soft);text-align:center;padding:34px 18px;font-size:14.5px;line-height:1.6}
+.empty .big{font-size:40px;display:block;margin-bottom:8px}
+
+/* ---------- bin grid ---------- */
+.bin-grid{display:grid;grid-template-columns:1fr 1fr;gap:10px}
+.bin-card{background:#fff;border-radius:var(--radius);box-shadow:var(--shadow);padding:13px;text-align:left;
+  display:flex;flex-direction:column;gap:5px;border-top:4px solid var(--blue-500)}
+.bin-card:active{transform:scale(.98)}
+.bin-card .bname{font-weight:700;font-size:15.5px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.bin-card .bdesc{font-size:12px;color:var(--ink-soft);min-height:15px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.bin-card .bcount{font-size:12.5px;color:var(--blue-700);font-weight:600}
+.bin-card .bflags{display:flex;gap:5px;flex-wrap:wrap;min-height:18px}
+
+/* ---------- pills & badges ---------- */
+.pill{font-size:10.5px;font-weight:700;padding:2px 8px;border-radius:99px;white-space:nowrap}
+.pill.green{background:var(--green-bg);color:var(--green)}
+.pill.amber{background:var(--amber-bg);color:var(--amber)}
+.pill.red{background:var(--red-bg);color:var(--red)}
+.pill.violet{background:var(--violet-bg);color:var(--violet)}
+.pill.gray{background:#e8eef4;color:var(--ink-soft)}
+.pill.blue{background:var(--blue-100);color:var(--blue-700)}
+
+/* ---------- item rows ---------- */
+.item-row{background:#fff;border-radius:var(--radius);box-shadow:var(--shadow);padding:11px 12px;margin-bottom:9px;
+  display:flex;align-items:center;gap:10px}
+.item-main{flex:1;min-width:0}
+.item-main .iname{font-weight:600;font-size:15px;display:flex;align-items:center;gap:6px;flex-wrap:wrap}
+.item-main .imeta{font-size:12px;color:var(--ink-soft);margin-top:3px;display:flex;gap:6px;flex-wrap:wrap;align-items:center}
+.item-row.dim{opacity:.55}
+.qtybox{display:flex;align-items:center;gap:2px;background:var(--blue-50);border-radius:12px;padding:3px}
+.qtybox button{width:34px;height:34px;border-radius:10px;font-size:19px;font-weight:700;color:var(--blue-700);
+  display:flex;align-items:center;justify-content:center}
+.qtybox button:active{background:var(--blue-100)}
+.qtybox .qv{min-width:34px;text-align:center;font-weight:700;font-size:15px}
+.qtybox .qu{font-size:10px;color:var(--ink-soft);display:block;font-weight:500}
+
+/* ---------- search ---------- */
+.searchbar{display:flex;gap:8px;margin-bottom:12px}
+.searchbar input{flex:1;border:1.5px solid var(--line);border-radius:12px;padding:12px 14px;font-size:16px;background:#fff}
+.searchbar input:focus{outline:none;border-color:var(--blue-500)}
+
+/* ---------- forms / sheet ---------- */
+#sheet-back{position:fixed;inset:0;background:rgba(10,25,40,.45);z-index:40;opacity:0;pointer-events:none;transition:opacity .18s}
+#sheet-back.show{opacity:1;pointer-events:auto}
+#sheet{position:fixed;left:0;right:0;bottom:0;z-index:41;background:#fff;border-radius:20px 20px 0 0;
+  max-height:88vh;overflow-y:auto;transform:translateY(105%);transition:transform .22s ease;
+  padding:8px 16px calc(20px + var(--safe-b));max-width:640px;margin:0 auto}
+#sheet.show{transform:translateY(0)}
+#sheet .grip{width:42px;height:5px;background:var(--line);border-radius:3px;margin:6px auto 12px}
+#sheet h2{font-size:18px;margin-bottom:14px}
+.frow{margin-bottom:12px}
+.frow label{display:block;font-size:12.5px;font-weight:700;color:var(--ink-soft);margin-bottom:5px}
+.frow input,.frow select,.frow textarea{width:100%;border:1.5px solid var(--line);border-radius:11px;
+  padding:11px 12px;font-size:16px;background:#fff}
+.frow input:focus,.frow select:focus,.frow textarea:focus{outline:none;border-color:var(--blue-500)}
+.frow2{display:grid;grid-template-columns:1fr 1fr;gap:10px}
+.chiprow{display:flex;gap:7px;flex-wrap:wrap}
+.chip{border:1.5px solid var(--line);border-radius:99px;padding:7px 13px;font-size:13.5px;background:#fff;color:var(--ink-soft)}
+.chip.sel{background:var(--blue-700);border-color:var(--blue-700);color:#fff;font-weight:600}
+.sheet-actions{display:flex;gap:9px;margin-top:16px}
+.sheet-actions .btn{flex:1}
+
+/* ---------- grocery ---------- */
+.g-row{display:flex;align-items:center;gap:11px;background:#fff;border-radius:var(--radius);box-shadow:var(--shadow);
+  padding:11px 13px;margin-bottom:9px}
+.g-row .gcheck{width:26px;height:26px;border-radius:8px;border:2px solid var(--blue-500);flex-shrink:0;
+  display:flex;align-items:center;justify-content:center;font-size:15px;color:#fff}
+.g-row.done .gcheck{background:var(--green);border-color:var(--green)}
+.g-row.done .gname{text-decoration:line-through;color:var(--ink-soft)}
+.g-row .gmain{flex:1;min-width:0}
+.g-row .gname{font-weight:600;font-size:15px}
+.g-row .gmeta{font-size:12px;color:var(--ink-soft);margin-top:2px}
+
+/* ---------- scanner ---------- */
+#scanner{position:fixed;inset:0;z-index:60;background:#000;display:none;flex-direction:column}
+#scanner.show{display:flex}
+#scanner video{flex:1;object-fit:cover;width:100%}
+#scanner .scan-top{position:absolute;top:0;left:0;right:0;padding:calc(14px + var(--safe-t)) 16px 12px;
+  display:flex;justify-content:space-between;align-items:center;color:#fff;
+  background:linear-gradient(rgba(0,0,0,.6),transparent)}
+#scanner .reticle{position:absolute;top:50%;left:50%;width:230px;height:230px;transform:translate(-50%,-50%);
+  border-radius:22px;box-shadow:0 0 0 4000px rgba(0,0,0,.35);outline:3px solid rgba(255,255,255,.9)}
+#scanner .scan-hint{position:absolute;bottom:calc(46px + var(--safe-b));left:0;right:0;text-align:center;color:#fff;
+  font-size:14.5px;text-shadow:0 1px 4px #000;padding:0 30px}
+
+/* ---------- QR / labels ---------- */
+.qrbox{display:flex;flex-direction:column;align-items:center;gap:10px;padding:8px 0 4px}
+.qrbox img{width:210px;height:210px;image-rendering:pixelated;border:1px solid var(--line);border-radius:10px;padding:8px;background:#fff}
+.labels-grid{display:grid;grid-template-columns:1fr 1fr;gap:12px}
+.label-card{background:#fff;border:1.5px dashed #9db4c8;border-radius:10px;padding:12px;text-align:center;
+  display:flex;flex-direction:column;align-items:center;gap:6px;break-inside:avoid}
+.label-card img{width:150px;height:150px;image-rendering:pixelated}
+.label-card .lname{font-weight:700;font-size:15px}
+.label-card .lsub{font-size:10.5px;color:var(--ink-soft)}
+@media print{
+  body{background:#fff}
+  #topbar,#nav,.no-print{display:none !important}
+  #view{padding:0;max-width:none}
+  .labels-grid{grid-template-columns:1fr 1fr}
+  .label-card{border:1.5px dashed #888}
+}
+
+/* ---------- settings ---------- */
+.set-row{display:flex;align-items:center;justify-content:space-between;gap:10px;padding:13px 2px;border-bottom:1px solid var(--line)}
+.set-row:last-child{border-bottom:none}
+.set-row .sl{font-size:14.5px;font-weight:600}
+.set-row .sd{font-size:12px;color:var(--ink-soft);margin-top:2px}
+.set-row input[type=number]{width:70px;border:1.5px solid var(--line);border-radius:9px;padding:7px;text-align:center;font-size:15px}
+.sync-dot{width:10px;height:10px;border-radius:50%;display:inline-block;margin-right:6px}
+.sync-dot.on{background:var(--green)} .sync-dot.off{background:#b0bfcc}
+
+/* ---------- toast ---------- */
+#toast{position:fixed;bottom:calc(96px + var(--safe-b));left:50%;transform:translateX(-50%) translateY(20px);
+  background:var(--ink);color:#fff;padding:11px 18px;border-radius:12px;font-size:14px;opacity:0;
+  transition:all .25s;z-index:70;pointer-events:none;max-width:88vw;text-align:center;box-shadow:var(--shadow)}
+#toast.show{opacity:1;transform:translateX(-50%) translateY(0)}
+
+/* install banner */
+#installbar{display:none;background:linear-gradient(120deg,var(--blue-700),var(--blue-500));color:#fff;border-radius:var(--radius);
+  padding:13px 14px;margin-bottom:12px;align-items:center;gap:11px}
+#installbar.show{display:flex}
+#installbar .it{flex:1;font-size:13.5px;line-height:1.4}
+#installbar .btn{background:#fff;color:var(--blue-700);padding:8px 14px;font-size:13.5px}
+.hl{background:var(--amber-bg) !important;transition:background 1.2s}
+</style>
+</head>
+<body>
+<header id="topbar">
+  <button class="iconbtn" id="backbtn" style="display:none">←</button>
+  <div class="title"><img src="icon-192.png" alt=""><span id="titletext">FroShizzle</span></div>
+  <button class="iconbtn" id="topaction" style="display:none">⋮</button>
+</header>
+
+<main id="view"></main>
+
+<nav id="nav">
+  <button data-nav="home"><span class="ni">🧊</span>Bins</button>
+  <button data-nav="search"><span class="ni">🔍</span>Search</button>
+  <div class="scanwrap"><button class="scanbtn" data-nav="scan" aria-label="Scan QR">▣</button></div>
+  <button data-nav="grocery"><span class="ni">🛒</span>Grocery<span class="badge" id="gbadge" style="display:none">0</span></button>
+  <button data-nav="settings"><span class="ni">⚙️</span>Settings</button>
+</nav>
+
+<div id="sheet-back"></div>
+<div id="sheet"></div>
+
+<div id="scanner">
+  <div class="scan-top">
+    <b>Scan a bin QR code</b>
+    <button class="iconbtn" id="scan-close">✕</button>
+  </div>
+  <video id="scan-video" playsinline muted></video>
+  <div class="reticle"></div>
+  <div class="scan-hint" id="scan-hint">Point the camera at a bin label</div>
+</div>
+
+<div id="toast"></div>
+
+<script src="qrcode.js"></script>
+<script src="jsqr.js"></script>
+<script src="app.js"></script>
+</body>
+</html>
