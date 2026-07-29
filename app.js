@@ -55,6 +55,7 @@ function loadState(){
   if(!Array.isArray(state.products)) state.products = [];
   // migration: build the product catalog from anything already entered
   state.items.filter(i => !i.deleted).forEach(i => upsertProduct(i, { quiet: true }));
+  dedupeProducts();
   // migration: items already sitting at qty 0 now disappear from bins
   state.items.filter(i => !i.deleted && (+i.qty || 0) <= 0).forEach(i => { i.deleted = true; i.updatedAt = Date.now(); });
 }
@@ -65,7 +66,17 @@ function saveLocal(){
 const liveBins   = () => state.bins.filter(b => !b.deleted);
 const liveItems  = () => state.items.filter(i => !i.deleted);
 const liveGroc   = () => state.grocery.filter(g => !g.deleted);
-const liveProds  = () => state.products.filter(p => !p.deleted).sort((a,b)=>a.name.localeCompare(b.name));
+const liveProds  = () => {
+  // display-level dedupe by name as a final safety net
+  const seen = new Set();
+  return state.products.filter(p => {
+    if(p.deleted) return false;
+    const key = p.name.trim().toLowerCase().replace(/\s+/g, ' ');
+    if(seen.has(key)) return false;
+    seen.add(key);
+    return true;
+  }).sort((a,b)=>a.name.localeCompare(b.name));
+};
 const bin        = (id) => state.bins.find(b => b.id === id && !b.deleted);
 const binItems   = (id) => liveItems().filter(i => i.binId === id).sort((a,b)=>a.name.localeCompare(b.name));
 
@@ -106,7 +117,7 @@ const sync = {
           changed = this.applyRemote(ch.doc.id, d) || changed;
         });
         this.applying = false;
-        if(changed){ saveLocal(); render(); }
+        if(changed){ dedupeProducts(); saveLocal(); render(); }
       }, (err) => { console.warn('sync error', err); this.status = 'error'; renderSyncStatus(); });
       this.status = 'on'; renderSyncStatus();
     } catch(e){
@@ -182,13 +193,24 @@ function touch(kind, entity){
 }
 
 /* ---------- product catalog ---------- */
+// Deterministic id from the product name, so every device generates the SAME id
+// for the same product and sync merges them instead of duplicating.
+function productIdFor(name){
+  const key = name.trim().toLowerCase().replace(/\s+/g, ' ');
+  let h = 5381;
+  for(let i = 0; i < key.length; i++){ h = ((h << 5) + h + key.charCodeAt(i)) >>> 0; }
+  return 'prod_' + h.toString(36) + '_' + key.replace(/[^a-z0-9]+/g, '-').slice(0, 24);
+}
+
 function upsertProduct(src, opts){
   const name = (src.name || '').trim();
   if(!name) return null;
+  const pid = productIdFor(name);
   const key = name.toLowerCase();
-  let p = state.products.find(x => x.name.trim().toLowerCase() === key && !x.deleted);
+  let p = state.products.find(x => x.id === pid && !x.deleted) ||
+          state.products.find(x => x.name.trim().toLowerCase() === key && !x.deleted);
   if(!p){
-    p = { id: uid(), name, unit: src.unit || 'pkg', category: src.category || 'Other', deleted: false, updatedAt: Date.now() };
+    p = { id: pid, name, unit: src.unit || 'pkg', category: src.category || 'Other', deleted: false, updatedAt: Date.now() };
     state.products.push(p);
     if(!(opts && opts.quiet)) touch('product', p);
   } else if(p.unit !== src.unit || p.category !== src.category){
@@ -197,6 +219,38 @@ function upsertProduct(src, opts){
     if(!(opts && opts.quiet)) touch('product', p);
   }
   return p;
+}
+
+// Repair: collapse duplicate catalog entries (same name, different ids) into
+// one canonical entry; tombstone the extras so the cleanup syncs everywhere.
+function dedupeProducts(){
+  const groups = {};
+  state.products.filter(p => !p.deleted).forEach(p => {
+    const key = p.name.trim().toLowerCase().replace(/\s+/g, ' ');
+    (groups[key] = groups[key] || []).push(p);
+  });
+  const dirty = [];
+  Object.keys(groups).forEach(key => {
+    const list = groups[key];
+    if(list.length < 2) return;
+    const canonId = productIdFor(list[0].name);
+    let keeper = list.find(p => p.id === canonId) || list[0];
+    if(keeper.id !== canonId){
+      // recreate under the canonical id
+      const np = { id: canonId, name: keeper.name, unit: keeper.unit, category: keeper.category, deleted: false, updatedAt: Date.now() };
+      state.products.push(np);
+      keeper = np;
+      dirty.push(np);
+    }
+    list.forEach(p => {
+      if(p.id !== keeper.id && !p.deleted){ p.deleted = true; p.updatedAt = Date.now(); dirty.push(p); }
+    });
+  });
+  if(dirty.length){
+    saveLocal();
+    dirty.forEach(p => { if(sync.enabled && sync.db) sync.push('product', p); });
+  }
+  return dirty.length > 0;
 }
 
 /* ---------- grocery automation ---------- */

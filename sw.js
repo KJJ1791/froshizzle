@@ -1,5 +1,5 @@
 /* FroShizzle service worker — cache-first app shell so the app works offline. */
-const CACHE = 'froshizzle-v2';
+const CACHE = 'froshizzle-v3';
 const SHELL = [
   './',
   './index.html',
