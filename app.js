@@ -210,12 +210,13 @@ function upsertProduct(src, opts){
   let p = state.products.find(x => x.id === pid && !x.deleted) ||
           state.products.find(x => x.name.trim().toLowerCase() === key && !x.deleted);
   if(!p){
-    p = { id: pid, name, unit: src.unit || 'pkg', category: src.category || 'Other', deleted: false, updatedAt: Date.now() };
+    p = { id: pid, name, unit: src.unit || 'pkg', category: src.category || 'Other', barcode: src.barcode || '', deleted: false, updatedAt: Date.now() };
     state.products.push(p);
     if(!(opts && opts.quiet)) touch('product', p);
-  } else if(p.unit !== src.unit || p.category !== src.category){
+  } else if(p.unit !== src.unit || p.category !== src.category || (src.barcode && p.barcode !== src.barcode)){
     p.unit = src.unit || p.unit;
     p.category = src.category || p.category;
+    if(src.barcode) p.barcode = src.barcode;
     if(!(opts && opts.quiet)) touch('product', p);
   }
   return p;
@@ -893,7 +894,7 @@ function openProductsSheet(){
     ${prods.length ? prods.map(p => `
       <div class="g-row">
         <div class="gmain"><div class="gname">${esc(p.name)}</div>
-        <div class="gmeta">${esc(p.unit)} · ${esc(p.category)}</div></div>
+        <div class="gmeta">${esc(p.unit)} · ${esc(p.category)}${p.barcode ? ' · ⌸ ' + esc(p.barcode) : ''}</div></div>
         <button class="iconbtn" style="background:var(--blue-50);color:var(--ink-soft);width:34px;height:34px" data-delp="${p.id}">✕</button>
       </div>`).join('') : '<div class="empty">Nothing saved yet — products appear here as you add items.</div>'}
     <div class="sheet-actions"><button class="btn ghost block" id="p-close">Close</button></div>`);
@@ -971,13 +972,114 @@ function openRestockSheet(g){
 }
 
 /* ============================================================
+   PRODUCT BARCODE LOOKUP (Open Food Facts — free, no key)
+   ============================================================ */
+function guessCategoryFromTags(tags){
+  const t = (tags || []).join(' ').toLowerCase();
+  if(/beef|veal/.test(t)) return 'Beef';
+  if(/pork|bacon|ham(?!burger)|sausage/.test(t)) return 'Pork';
+  if(/chicken|poultry|turkey|duck/.test(t)) return 'Chicken';
+  if(/fish|seafood|shrimp|salmon|tuna|crab|lobster/.test(t)) return 'Seafood';
+  if(/vegetable|peas|corn|bean|broccoli|spinach|fries|potato/.test(t)) return 'Vegetables';
+  if(/fruit|berr|mango|pineapple/.test(t)) return 'Fruit';
+  if(/pizza|meal|lasagn|entree|prepared|soup|dumpling|nugget/.test(t)) return 'Prepared Meals';
+  if(/bread|dough|pastr|flour|baking/.test(t)) return 'Baking';
+  if(/dessert|ice-cream|ice cream|cake|pie(?!rogi)|chocolate/.test(t)) return 'Desserts';
+  return 'Other';
+}
+
+async function offLookup(code){
+  try {
+    const r = await fetch('https://world.openfoodfacts.org/api/v2/product/' + encodeURIComponent(code) + '.json?fields=product_name,brands,quantity,categories_tags');
+    if(!r.ok) return null;
+    const j = await r.json();
+    if(j.status !== 1 || !j.product) return null;
+    const p = j.product;
+    const brand = (p.brands || '').split(',')[0].trim();
+    let name = (p.product_name || '').trim();
+    if(brand && name && !name.toLowerCase().includes(brand.toLowerCase())) name = brand + ' ' + name;
+    if(!name) name = brand;
+    if(!name) return null;
+    return { name, category: guessCategoryFromTags(p.categories_tags), size: (p.quantity || '').trim() };
+  } catch(e){ return null; }
+}
+
+async function openBarcodeFlow(code){
+  const known = state.products.find(p => !p.deleted && p.barcode === code);
+  if(known){
+    openScannedSheet({ barcode: code, name: known.name, unit: known.unit, category: known.category, source: 'saved' });
+    return;
+  }
+  toast('Looking up barcode ' + code + '…');
+  const info = await offLookup(code);
+  if(info) openScannedSheet({ barcode: code, name: info.name, category: info.category, size: info.size, source: 'off' });
+  else openScannedSheet({ barcode: code, source: null });
+}
+
+function openScannedSheet(pref){
+  const bins = liveBins();
+  if(!bins.length){ toast('Create a bin first'); return; }
+  const srcLine = pref.source === 'saved'
+    ? '<span class="pill green">✓ recognized — you\'ve scanned this before</span>'
+    : pref.source === 'off'
+      ? '<span class="pill blue">✓ found in the product database</span>'
+      : '<span class="pill amber">new barcode — name it once and the app remembers it forever</span>';
+  openSheet(`
+    <h2>📦 Scanned item</h2>
+    <div style="margin:-6px 0 12px;display:flex;gap:6px;flex-wrap:wrap;align-items:center">${srcLine}
+      <span class="pill gray">${esc(pref.barcode)}</span></div>
+    <div class="frow"><label>Item name</label><input id="sb-name" value="${esc(pref.name || '')}" placeholder="e.g. Green Giant Sweet Peas" autocomplete="off"></div>
+    <div class="frow2">
+      <div class="frow"><label>How many going in?</label><input id="sb-qty" type="number" min="1" value="1"></div>
+      <div class="frow"><label>Unit</label><select id="sb-unit">${UNITS.map(u => `<option ${u === (pref.unit || 'pkg') ? 'selected' : ''}>${u}</option>`).join('')}</select></div>
+    </div>
+    <div class="frow"><label>Category</label>${chipRow('sb-cat', CATEGORIES, pref.category || 'Other')}</div>
+    <div class="frow"><label>Which bin is it going into?</label>
+      <select id="sb-bin">${bins.map(b => `<option value="${b.id}">${esc(b.name)}${b.desc ? ' — ' + esc(b.desc) : ''}</option>`).join('')}</select></div>
+    ${pref.size ? `<div style="font-size:12.5px;color:var(--ink-soft);margin-bottom:10px">Package size: ${esc(pref.size)} (saved to notes)</div>` : ''}
+    <div class="sheet-actions">
+      <button class="btn ghost" id="sb-cancel">Cancel</button>
+      <button class="btn" id="sb-save">Put in freezer ❄</button>
+    </div>`);
+  bindChips('sb-cat');
+  $('#sb-cancel').onclick = closeSheet;
+  $('#sb-save').onclick = () => {
+    const name = $('#sb-name').value.trim();
+    if(!name){ toast('Give it a name'); return; }
+    const binId = $('#sb-bin').value;
+    const qty = Math.max(1, parseInt($('#sb-qty').value, 10) || 1);
+    const unit = $('#sb-unit').value;
+    const category = chipVal('sb-cat') || 'Other';
+    // merge with an identical live item already in that bin
+    let it = state.items.find(x => !x.deleted && x.binId === binId && x.unit === unit &&
+      x.name.toLowerCase() === name.toLowerCase());
+    if(it){
+      it.qty = (+it.qty || 0) + qty;
+      it.dateFrozen = todayStr();
+      it.status = 'Available';
+      touch('item', it);
+    } else {
+      it = { id: uid(), binId, name, qty, unit, category, dateFrozen: todayStr(), bestBefore: '',
+        status: 'Available', notes: pref.size ? pref.size + ' · scanned' : '', deleted: false };
+      state.items.push(it);
+      touch('item', it);
+    }
+    upsertProduct({ name, unit, category, barcode: pref.barcode });
+    closeSheet();
+    const b = bin(binId);
+    toast(`"${name}" → ${b ? b.name : 'bin'} ✓`);
+    nav('bin/' + binId);
+  };
+}
+
+/* ============================================================
    QR SCANNER
    ============================================================ */
 const scanner = {
   stream: null, raf: null, detector: null, running: false,
   async open(){
     $('#scanner').classList.add('show');
-    $('#scan-hint').textContent = 'Point the camera at a bin label';
+    $('#scan-hint').textContent = 'Point at a bin label or a product barcode';
     try {
       this.stream = await navigator.mediaDevices.getUserMedia({
         video: { facingMode: { ideal: 'environment' }, width: { ideal: 1280 }, height: { ideal: 720 } },
@@ -993,8 +1095,9 @@ const scanner = {
     this.running = true;
     if('BarcodeDetector' in window){
       try {
-        const fmts = await BarcodeDetector.getSupportedFormats();
-        if(fmts.includes('qr_code')) this.detector = new BarcodeDetector({ formats: ['qr_code'] });
+        const supported = await BarcodeDetector.getSupportedFormats();
+        const want = ['qr_code','ean_13','ean_8','upc_a','upc_e','code_128'].filter(f => supported.includes(f));
+        if(want.length) this.detector = new BarcodeDetector({ formats: want });
       } catch(e){ this.detector = null; }
     }
     this.tick();
@@ -1022,6 +1125,7 @@ const scanner = {
       }
       if(text){
         const binId = parseScan(text);
+        const upc = text.trim().match(/^\d{6,14}$/);
         if(binId){
           if(bin(binId)){
             this.close();
@@ -1030,8 +1134,14 @@ const scanner = {
             return;
           }
           $('#scan-hint').textContent = 'That QR is a FroShizzle bin, but it isn\'t in this app\'s data (was it deleted, or is sync not set up?)';
+        } else if(upc){
+          // product barcode → identify + ask which bin
+          this.close();
+          if(navigator.vibrate) navigator.vibrate(80);
+          openBarcodeFlow(upc[0]);
+          return;
         } else {
-          $('#scan-hint').textContent = 'That doesn\'t look like a FroShizzle bin label';
+          $('#scan-hint').textContent = 'That doesn\'t look like a bin label or a product barcode';
         }
       }
     }
